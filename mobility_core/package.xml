@@ -1,0 +1,14 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>mobility_core</name>
+  <version>0.1.0</version>
+  <description>ROS-free maths for the mobility stack: swerve kinematics, PID, DC motor model.</description>
+  <maintainer email="mrt@example.com">MRT Mobility</maintainer>
+  <license>BSD-3-Clause</license>
+  <exec_depend>python3-numpy</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

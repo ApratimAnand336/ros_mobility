@@ -1,0 +1,41 @@
+# Unity domain via ROS-TCP-Endpoint (127.0.0.1:10000). Contract: docs/UNITY_BRIDGE.md.
+# Unity side: Assets/Scripts/CoupledDiff/MobilityBridge.cs (auto-attached to the rover at Play).
+wheel_controller:
+  ros__parameters:
+    auto_arm: true
+    update_rate: 100.0
+    steer_release: 0.035
+    # Same motor model as Gazebo, but Unity's faceted wheel hulls scrub ~20 N*m when
+    # steering, so the Gazebo steer gains (kp 0.8) lag 5-22 deg. These are Unity's own
+    # tuned mode-5 gains converted to duty (800/150/6 N*m / 144 N*m stall), verified
+    # headless 2026-11-24: demo PASS, worst steer p95 2.5 deg
+    # (ROS_unity/unity/Tools/MobilityBridgeTest/run_bridge_test.sh).
+    steer: {kp: 5.5, ki: 1.0, kd: 0.04, kr: 0.15, i_limit: 0.4, deadzone: 0.002}
+    drive: {kp: 0.1, ki: 0.6, kd: 0.0, kv: 0.0625, ks: 0.0, i_limit: 0.4, hold_i_limit: 0.3}
+
+unity_adapter:
+  ros__parameters:
+    update_rate: 100.0
+    effort_timeout: 0.25
+    source_timeout: 0.15        # s, a joint with no bridge sample this long is dropped
+    feedback_topic: /unity/joint_states
+    effort_topic: /unity/effort_cmd
+    output_mode: normalized          # u in [-1, 1]; MobilityBridge applies the motor model in
+                                     # Unity at 200 Hz (torque = N*m from this node, not used)
+    command_order: [fl, fr, bl, br]
+    # Only used if output_mode: torque. In normalized mode the motor constants live in
+    # MobilityBridge (inspector) and must match these.
+    drive_motor: {v_bus: 24.0, gear_ratio: 50.0, kt: 0.03, ke: 0.03, resistance: 0.5, max_torque: 300.0}
+    steer_motor: {v_bus: 24.0, gear_ratio: 100.0, kt: 0.03, ke: 0.03, resistance: 0.5, max_torque: 150.0}
+    joints:
+      # MobilityBridge publishes canonical names and values already in the ROS convention
+      # (rad, rad/s, steer + left, drive + forward), using RoverDriveController's own sign
+      # calibration, so every sign here is +1.
+      fl_steer: {name: fl_steer}
+      fr_steer: {name: fr_steer}
+      bl_steer: {name: bl_steer}
+      br_steer: {name: br_steer}
+      fl_drive: {name: fl_drive}
+      fr_drive: {name: fr_drive}
+      bl_drive: {name: bl_drive}
+      br_drive: {name: br_drive}

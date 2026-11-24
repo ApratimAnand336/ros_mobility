@@ -1,0 +1,134 @@
+# Domain-independent settings. A domain yaml (mock/gazebo/unity/real.yaml) is loaded
+# after this one and may override any key here.
+
+swerve_kinematics:
+  ros__parameters:
+    update_rate: 100.0          # Hz
+    command_timeout: 0.5        # s without cmd_vel -> command zero
+    mode: ackermann             # ackermann | crab | explicit
+    cmd_vel_stamped: true       # TwistStamped (Jazzy / Nav2 default); false = Twist
+    seed_from_feedback: true
+    max_speed: 1.0              # m/s
+    max_yaw_rate: 1.0           # rad/s
+    min_turn_radius: 0.8        # m, ackermann
+    max_wheel_turn_rate: 2.0    # rad/s, steer setpoint slew
+    speed_ramp_time: 1.2        # s, 0 -> max_speed
+    steer_ramp_time: 0.8        # s, yaw-rate lock to lock
+    explicit_max_steer_angle: 1.5708   # rad
+    explicit_max_steer_rate: 1.0       # rad/s
+    hold_epsilon: 0.001         # m/s
+
+wheel_controller:
+  ros__parameters:
+    update_rate: 100.0          # Hz
+    feedback_timeout: 0.2       # s, stale feedback -> u = 0
+    setpoint_timeout: 0.3       # s
+    auto_arm: false             # real rover must be armed: ros2 service call /mobility/arm ...
+    cos_scaling: true           # drive *= cos(steer error)
+    steer_release: 0.0          # rad; parked wheel rolls free while steer error > this (0 = off)
+    diagnostics_rate: 5.0       # Hz
+    # Output u is normalised effort (PWM duty), so gains are in duty per rad / per rad/s.
+    steer:                      # position loop on steer angle (rad)
+      kp: 3.0
+      ki: 1.0
+      kd: 0.1                   # on measured steer rate
+      kr: 0.125                 # duty per rad/s of setpoint rate = 1 / steer no-load speed
+      i_limit: 0.3
+      d_filter_tau: 0.01
+      deadzone: 0.002           # rad, stops chatter when on target
+      slew_rate: 0.0            # 1/s, 0 = off
+      out_limit: 1.0
+    drive:                      # velocity loop on wheel speed (rad/s)
+      kp: 0.3
+      ki: 1.0
+      kd: 0.0
+      kv: 0.0625                # feedforward duty per rad/s = 1 / no-load speed
+      ks: 0.03                  # duty to overcome static friction
+      i_limit: 0.5
+      hold_i_limit: 0.3         # bounded brake when parked (hill hold)
+      slew_rate: 0.0
+      out_limit: 1.0
+    # Per-joint override example (any field):
+    # br_drive:
+    #   kp: 0.35
+
+wheel_odometry:
+  ros__parameters:
+    odom_frame: odom
+    base_frame: base_link
+    publish_tf: false           # EKF owns odom -> base_link
+    twist_covariance: [0.01, 0.01, 0.02]
+
+teleop_keyboard:
+  ros__parameters:
+    use_sim_time: false         # key timing is wall-clock in every domain
+    max_speed: 1.0              # m/s at speed_scale 1
+    max_yaw_rate: 1.0           # rad/s
+    max_steer_rate: 0.5         # rad/s, explicit mode A/D
+    speed_scale: 0.5
+    speed_scale_step: 0.1
+    accel: 1.0                  # m/s^2
+    decel: 2.0                  # m/s^2
+    yaw_accel: 2.0              # rad/s^2
+    key_hold_time: 0.6          # s, > OS key-repeat delay
+    initial_mode: ackermann
+    modes: [ackermann, crab, explicit]
+
+teleop_key_window:
+  ros__parameters:
+    use_sim_time: false         # key timing is wall-clock in every domain
+    update_rate: 50.0
+    max_speed: 1.0              # m/s at speed_scale 1
+    max_yaw_rate: 1.0           # rad/s, A/D in ackermann
+    max_steer_rate: 0.5         # rad/s, A/D in explicit (aim sweep speed)
+    speed_scale: 0.5            # starting scale, +/- change it
+    speed_scale_step: 0.1
+    boost: 2.0                  # Shift multiplies drive speed (kinematics caps at max_speed)
+    accel: 1.0                  # m/s^2
+    decel: 2.0                  # m/s^2
+    yaw_accel: 2.0              # rad/s^2
+    recentre_gain: 3.0          # 1/s, C straightens the explicit aim at rate = gain * aim
+    key_release_debounce_ms: 250   # from the team's Gazebo GUI: X11 auto-repeat sends fake
+                                   # release+press pairs; a release counts after this long
+    initial_mode: ackermann
+    modes: [ackermann, crab, explicit]
+
+teleop_joy:
+  ros__parameters:
+    use_sim_time: false
+    max_speed: 1.0
+    max_yaw_rate: 1.0
+    max_steer_rate: 0.5
+    speed_scale: 0.5
+    speed_scale_step: 0.1
+    accel: 1.0
+    decel: 2.0
+    yaw_accel: 2.0
+    initial_mode: ackermann
+    modes: [ackermann, crab, explicit]
+    # [OPEN Q4] Mapping below is an Xbox-style pad placeholder. Check yours with
+    # `ros2 run joy joy_node` + `ros2 topic echo /joy`, then edit. -1 disables.
+    axis_vx: 1                  # left stick up/down
+    axis_vy: 0                  # left stick left/right
+    axis_wz: 3                  # right stick left/right
+    axis_scale: -1              # 4th axis (throttle) -> speed scale; -1 = use buttons
+    invert_vx: false
+    invert_vy: false
+    invert_wz: false
+    invert_scale: false
+    button_deadman: 4           # LB, hold to drive
+    button_estop: 1             # B, toggles e-stop
+    button_mode: 0              # A, cycles modes
+    button_scale_up: 5          # RB
+    button_scale_down: -1
+    require_deadman: true
+    deadband: 0.08
+    expo: 0.3
+    joy_timeout: 0.5            # s, no /joy -> stop
+
+joy_node:
+  ros__parameters:
+    use_sim_time: false
+    device_id: 0
+    deadzone: 0.0               # deadband handled in teleop_joy
+    autorepeat_rate: 20.0

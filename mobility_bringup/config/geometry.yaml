@@ -1,0 +1,12 @@
+# Single source of truth for rover geometry, shared by every node (/**).
+# Copied from ROS2_Autonomous_2026_27 src/rover_gazebo/config/rover_kinematics.yaml
+# (generated from CAD by tools/derive_ratios.py). Canonical frame: x forward, y left.
+# If the CAD changes, re-run derive_ratios.py there and copy the numbers here.
+/**:
+  ros__parameters:
+    wheel_names: [fl, fr, bl, br]          # order used by every array below
+    wheel_x: [0.372365, 0.372365, -0.372365, -0.371204]   # m
+    wheel_y: [0.218, -0.218, 0.218, -0.218]               # m
+    wheel_radius: 0.14985                  # m
+    steer_limit: 1.5708                    # rad, |canonical steer| allowed
+                                           # [OPEN Q3: real mechanical/cable limit]

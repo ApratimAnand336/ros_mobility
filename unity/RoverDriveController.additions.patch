@@ -1,0 +1,30 @@
+--- a/Assets/Scripts/CoupledDiff/RoverDriveController.cs
++++ b/Assets/Scripts/CoupledDiff/RoverDriveController.cs
+@@ -185,6 +185,27 @@
+ 
+     public bool IsReady => ready;
+ 
++    /// <summary>Wheel i's collider radius relative to the mean (1 if compensation is off).</summary>
++    public float WheelRadiusScale(int i) => compensateWheelRadii ? wheelColliders.RelativeRadius(i) : 1f;
++
++    /// <summary>
++    /// Re-seed from where the joints are now and clear every ramped command. Call it
++    /// just before re-enabling this component after something else (MobilityBridge)
++    /// drove the joints, so nothing snaps back to the angles from before the hand-over.
++    /// </summary>
++    public void ResyncFromMeasured()
++    {
++        if (!ready) return;
++        for (int i = 0; i < 4; i++) wheelAngle[i] = MeasuredSteerAngle(i);
++        float lim = explicitMaxSteerAngle * Mathf.Deg2Rad;
++        aim = Mathf.Clamp(wheelAngle[0], -lim, lim);
++        command = Vector3.zero;
++        want = Vector3.zero;
++        recentring = recentreRequested = false;
++        activeMode = mode;
++        if (mode == SteerMode.ExplicitPid && !pidActive) EnterTorqueMode();
++    }
++
+     /// <summary>Kinematic steering angle of wheel i as measured, radians, positive left.</summary>
+     public float MeasuredSteerAngle(int i) => steerSign[i] * steers[i].jointPosition[0];
+ 

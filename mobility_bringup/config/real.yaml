@@ -1,0 +1,40 @@
+# Real rover: SmartElex 30D (PWM/DIR) via CAN to the motor MCU.
+# Feedback is EKF-fused steer angle + wheel angular velocity.
+# Everything tagged [OPEN Qn] is a placeholder: see OPEN_QUESTIONS.md.
+wheel_controller:
+  ros__parameters:
+    auto_arm: false             # arm explicitly: ros2 service call /mobility/arm std_srvs/srv/SetBool "{data: true}"
+    feedback_timeout: 0.2       # [OPEN Q1] depends on the EKF output rate
+    # Gains: start from common.yaml, retune on the rover (wheels off the ground first).
+
+can_adapter:
+  ros__parameters:
+    update_rate: 100.0
+    heartbeat_rate: 20.0
+    effort_timeout: 0.25
+    source_timeout: 0.15        # [OPEN Q1] s, a joint with no EKF sample this long is dropped -> controller stops; set to ~3x the EKF period
+    command_order: [fl, fr, bl, br]
+    max_duty: 0.9               # [OPEN Q3] cap on |PWM duty|
+    deadband: 0.05              # [OPEN Q3] duty needed to overcome static friction
+    can:
+      backend: dryrun           # socketcan on the rover; dryrun = log only
+      channel: can0
+      drive_id: 0x101           # [OPEN Q2] all CAN ids / layout
+      steer_id: 0x102
+      heartbeat_id: 0x100
+      extended_id: false
+      duty_scale: 32767.0
+      little_endian: true
+    # [OPEN Q1] EKF topics. Placeholder = per-wheel JointState like rover_ekf's
+    # steer_wheel_splitter: /wheel_xx/steer_encoder with names [drive, steer].
+    joints:
+      fl_steer: {topic: /wheel_fl/steer_encoder, name: steer, field: position, sign: 1.0, offset: 0.0}
+      fr_steer: {topic: /wheel_fr/steer_encoder, name: steer, field: position, sign: 1.0, offset: 0.0}
+      bl_steer: {topic: /wheel_rl/steer_encoder, name: steer, field: position, sign: 1.0, offset: 0.0}
+      br_steer: {topic: /wheel_rr/steer_encoder, name: steer, field: position, sign: 1.0, offset: 0.0}
+      fl_drive: {topic: /wheel_fl/steer_encoder, name: drive, field: velocity, sign: 1.0}
+      fr_drive: {topic: /wheel_fr/steer_encoder, name: drive, field: velocity, sign: 1.0}
+      bl_drive: {topic: /wheel_rl/steer_encoder, name: drive, field: velocity, sign: 1.0}
+      br_drive: {topic: /wheel_rr/steer_encoder, name: drive, field: velocity, sign: 1.0}
+      # cmd_sign: per joint, if a motor is wired opposite to its encoder (default = sign)
+      # deadband: per joint override of the deadband above

@@ -1,0 +1,41 @@
+# Gazebo domain: ROS2_Autonomous_2026_27 rover_gazebo (Harmonic + gz_ros2_control).
+# Joint names / signs from rover_gazebo/config/rover_kinematics.yaml:
+#   steer_sign -1 on all four; drive_sign -1 on BR only.
+wheel_controller:
+  ros__parameters:
+    auto_arm: true
+    update_rate: 200.0          # matches the reference control_node.py rate
+    steer_release: 0.035        # rad (2 deg): don't brake a parked wheel while it steers
+    # Gains = reference rover_gazebo PID (N*m units) / motor stall torque, so they
+    # match the hand-tuned Gazebo loop: steer stall 144 N*m, drive stall 72 N*m.
+    steer: {kp: 0.8, ki: 0.5, kd: 0.03, kr: 0.125, i_limit: 0.6, deadzone: 0.002}
+    drive: {kp: 0.1, ki: 0.6, kd: 0.0, kv: 0.0625, ks: 0.0, i_limit: 0.4, hold_i_limit: 0.3}
+
+gazebo_adapter:
+  ros__parameters:
+    update_rate: 200.0
+    effort_timeout: 0.25
+    source_timeout: 0.15        # s, a joint with no Gazebo /joint_states sample this long is dropped
+    feedback_topic: /joint_states
+    command_order: [fl, fr, bl, br]      # = joint order in controllers.yaml
+    steer_command_topic: /steer_pid_controller/commands
+    drive_command_topic: /wheel_pid_controller/commands
+    switch_controllers: true
+    activate_controllers: [steer_pid_controller, wheel_pid_controller]
+    deactivate_controllers: [steer_controller, wheel_controller]
+    # Same placeholder motors as mock, so gains carry over. Effort limit 150 N*m (URDF).
+    drive_motor: {v_bus: 24.0, gear_ratio: 50.0, kt: 0.03, ke: 0.03, resistance: 0.5, max_torque: 150.0}
+    steer_motor: {v_bus: 24.0, gear_ratio: 100.0, kt: 0.03, ke: 0.03, resistance: 0.5, max_torque: 150.0}
+    joints:
+      fl_steer: {name: FLE_joint, sign: -1.0}
+      fr_steer: {name: FRE_joint, sign: -1.0}
+      bl_steer: {name: BLE_joint, sign: -1.0}
+      br_steer: {name: BRE_joint, sign: -1.0}
+      fl_drive: {name: FLD_joint, sign: 1.0}
+      fr_drive: {name: FRD_joint, sign: 1.0}
+      bl_drive: {name: BLD_joint, sign: 1.0}
+      br_drive: {name: BRD_joint, sign: -1.0}
+
+scripted_drive:
+  ros__parameters:
+    start_delay: 15.0           # s of sim time: let spawn + controller switch finish

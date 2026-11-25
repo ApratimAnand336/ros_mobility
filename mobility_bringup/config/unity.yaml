@@ -5,11 +5,13 @@ wheel_controller:
     auto_arm: true
     update_rate: 100.0
     steer_release: 0.035
-    # Same motor model as Gazebo, but Unity's faceted wheel hulls scrub ~20 N*m when
-    # steering, so the Gazebo steer gains (kp 0.8) lag 5-22 deg. These are Unity's own
-    # tuned mode-5 gains converted to duty (800/150/6 N*m / 144 N*m stall), verified
-    # headless 2026-11-24: demo PASS, worst steer p95 2.5 deg
-    # (ROS_unity/unity/Tools/MobilityBridgeTest/run_bridge_test.sh).
+    # unity_control:=setpoint (default): these gains are sent to Unity, which runs the
+    # loops inside its physics step (no ROS-TCP delay in the loop). Unity's faceted wheel
+    # hulls scrub ~20 N*m when steering, so this is Unity's own mode-5 steering gain in duty
+    # units (800/150/6 N*m / 144 N*m stall). Verified headless at the editor's 10 fps
+    # (2026-11-25): demo PASS 11/11, worst steer p95 2.4 deg, no oscillation when parked.
+    # (In unity_control:=effort the loop runs over TCP and these gains oscillate below
+    # ~100 fps; use kp ~1.8 there.)
     steer: {kp: 5.5, ki: 1.0, kd: 0.04, kr: 0.15, i_limit: 0.4, deadzone: 0.002}
     drive: {kp: 0.1, ki: 0.6, kd: 0.0, kv: 0.0625, ks: 0.0, i_limit: 0.4, hold_i_limit: 0.3}
 

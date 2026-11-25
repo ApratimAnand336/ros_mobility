@@ -23,6 +23,11 @@ public class BridgeTestRunner : MonoBehaviour
     void Start()
     {
         runSeconds = float.Parse(Arg("-runSeconds", "240"), CultureInfo.InvariantCulture);
+        // -targetFps N caps the frame rate like the editor with cameras does; ROS messages
+        // are delivered once per frame, so this reproduces the editor's loop delay.
+        int fps = int.Parse(Arg("-targetFps", "0"), CultureInfo.InvariantCulture);
+        if (fps > 0) { QualitySettings.vSyncCount = 0; Application.targetFrameRate = fps; }
+        Debug.Log($"[BridgeTest] targetFrameRate {Application.targetFrameRate}");
         w = new StreamWriter(Arg("-traceOut", "bridge_trace.csv")) { AutoFlush = true };
         w.WriteLine("t,engaged,x,z,yaw_deg,speed,sFL,sFR,sBL,sBR,uSFL,uSFR,uSBL,uSBR,uDFL,uDFR,uDBL,uDBR");
         Debug.Log($"[BridgeTest] running {runSeconds} s, fixedDeltaTime {Time.fixedDeltaTime}");

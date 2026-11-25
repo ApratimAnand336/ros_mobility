@@ -67,6 +67,19 @@ class WheelController:
                 out[d] = 0.0
         return out
 
+    def config(self):
+        """The fully resolved per-joint gains as a plain dict (JSON-able), for a remote
+        executor of the same loops (Unity's MobilityPid.cs). hold_i_limit None -> -1."""
+        joints = []
+        for j, p in self.pids.items():
+            g = dict(vars(p.g))
+            g["hold_i_limit"] = -1.0 if g["hold_i_limit"] is None else float(g["hold_i_limit"])
+            g = {k: (bool(v) if k == "angular" else float(v)) for k, v in g.items()}
+            g["name"] = j
+            joints.append(g)
+        return {"cos_scaling": bool(self.cos_scaling),
+                "steer_release": float(self.steer_release), "joints": joints}
+
     def status(self):
         """{joint: (error, output, saturated)} for diagnostics."""
         return {j: (p.error, p.output, p.saturated) for j, p in self.pids.items()}

@@ -23,9 +23,13 @@ from std_msgs.msg import String
 
 from . import common as C
 
-# (label, mode, vx, vy, wz, seconds[, checks])  checks: 'all' (default) or 'steer_only'.
+# (label, mode, vx, vy, wz, seconds[, checks])  checks: 'all' (default), 'steer_only' or 'hold'.
 # steer_only = steering in place: wheels may roll freely (steer_release), so drive speed
 # isn't graded; instead the body must stay put (|odom v| < still_tol).
+# hold = parked with no command: graded over everything after the first second (not just
+# the last `window`), and the steering must not shake: its back-and-forth travel (total
+# path minus net change) must stay < max_hold_jitter_deg. A slow one-way creep onto the
+# target scores 0; a left/right jitter scores its full travel.
 SEQUENCES = {
     "default": [
         ("settle", "ackermann", 0.0, 0.0, 0.0, 2.0),
@@ -41,6 +45,16 @@ SEQUENCES = {
         ("explicit_roll", "explicit", 0.4, 0.0, 0.0, 4.0),
         ("final_stop", "ackermann", 0.0, 0.0, 0.0, 3.0),
     ],
+    # Parked holds at 0 deg, at a ~43 deg explicit aim, and crabbed sideways (~90 deg).
+    "hold": [
+        ("settle", "ackermann", 0.0, 0.0, 0.0, 2.0),
+        ("hold_straight", "ackermann", 0.0, 0.0, 0.0, 10.0, "hold"),
+        ("aim", "explicit", 0.0, 0.0, 0.3, 2.5, "steer_only"),     # aim -> 0.75 rad
+        ("hold_aimed", "explicit", 0.0, 0.0, 0.0, 10.0, "hold"),
+        ("crab_move", "crab", 0.0, 0.3, 0.0, 3.0),
+        ("hold_crab", "crab", 0.0, 0.0, 0.0, 10.0, "hold"),
+        ("final_stop", "ackermann", 0.0, 0.0, 0.0, 2.0),
+    ],
 }
 
 
@@ -54,10 +68,17 @@ class ScriptedDrive(Node):
         self.drive_rel_tol = C.param(self, "drive_rel_tol", 0.10)
         self.drive_abs_tol = C.param(self, "drive_abs_tol", 0.1)      # rad/s
         self.still_tol = C.param(self, "still_tol", 0.05)            # m/s
+        self.max_hold_jitter = C.param(self, "max_hold_jitter_deg", 0.5)
         self.start_delay = C.param(self, "start_delay", 2.0)
         self.cmd_pub = self.create_publisher(TwistStamped, C.CMD_VEL, 10)
         self.mode_pub = self.create_publisher(String, C.STEER_MODE, C.LATCHED)
-        self.create_subscription(JointState, C.SETPOINTS, self.on_sp, 10)
+        # setpoint_topic: where the graded setpoints come from. Default: what ROS asked
+        # for. Unity setpoint mode: /unity/controller_state, the setpoints the in-Unity
+        # loops actually used, published at the same physics instant as the joint states,
+        # so the ROS-TCP frame delay is not counted as tracking error.
+        sp_topic = C.param(self, "setpoint_topic", C.SETPOINTS)
+        self.sp_from_state = sp_topic != C.SETPOINTS
+        self.create_subscription(JointState, sp_topic, self.on_sp, 10)
         self.create_subscription(JointState, C.JOINT_STATES, self.on_js, 10)
         self.create_subscription(Odometry, C.WHEEL_ODOM, self.on_odom, 10)
         self.sp, self.pos, self.vel, self.twist = {}, {}, {}, (0.0, 0.0, 0.0)
@@ -69,7 +90,8 @@ class ScriptedDrive(Node):
     def on_sp(self, m):
         pos, vel, _ = C.joint_state_to_dicts(m)
         self.sp.update({j: pos[j] for j in self.geo.steer_joints if j in pos})
-        self.sp.update({j: vel[j] for j in self.geo.drive_joints if j in vel})
+        src = pos if self.sp_from_state else vel   # controller_state: drive target in position
+        self.sp.update({j: src[j] for j in self.geo.drive_joints if j in src})
 
     def on_js(self, m):
         pos, vel, _ = C.joint_state_to_dicts(m)
@@ -109,7 +131,13 @@ class ScriptedDrive(Node):
         msg.header.frame_id = "base_link"
         msg.twist.linear.x, msg.twist.linear.y, msg.twist.angular.z = vx, vy, wz
         self.cmd_pub.publish(msg)
-        if t - self.seg_t0 >= dur - self.window:
+        hold = self.cur["checks"] == "hold"
+        if hold and t - self.seg_t0 >= 1.0:
+            for j in self.geo.steer_joints:
+                if j in self.pos:
+                    self.cur.setdefault("path", {}).setdefault(j, []).append(
+                        math.degrees(self.pos[j]))
+        if t - self.seg_t0 >= (1.0 if hold else dur - self.window):
             for j in self.geo.steer_joints:
                 if j in self.sp and j in self.pos:
                     self.cur["steer"].setdefault(j, []).append(
@@ -128,6 +156,10 @@ class ScriptedDrive(Node):
             e = sorted(errs)
             steer = max(steer, e[min(len(e) - 1, int(0.95 * len(e)))])
         drive = 0.0
+        if r["checks"] == "hold":
+            r["jitter"] = max((sum(abs(b - a) for a, b in zip(v, v[1:])) - abs(v[-1] - v[0])
+                               for v in r.get("path", {}).values() if len(v) > 1), default=0.0)
+            return steer, 100.0 * r["max_v"] / self.still_tol   # body must stay still
         if r["checks"] == "steer_only":
             return steer, 100.0 * r["max_v"] / self.still_tol   # body must stay still
         for samples in r["drive"].values():
@@ -144,10 +176,14 @@ class ScriptedDrive(Node):
         for r in self.results:
             steer, drive = self.score(r)
             bad = steer > self.max_steer_err_deg or drive > 100.0
+            jit = ""
+            if "jitter" in r:
+                bad |= r["jitter"] > self.max_hold_jitter
+                jit = f"  back-and-forth {r['jitter']:.2f}° (max {self.max_hold_jitter:g})"
             ok &= not bad
             tw = r["twist"] or (0, 0, 0)
             lines.append(f"{r['label']:14s} {steer:10.2f} {drive:10.1f}   "
-                         f"{tw[0]:+.2f} {tw[1]:+.2f} {tw[2]:+.2f}  {'FAIL' if bad else 'ok'}")
+                         f"{tw[0]:+.2f} {tw[1]:+.2f} {tw[2]:+.2f}  {'FAIL' if bad else 'ok'}{jit}")
         lines.append("RESULT: " + ("PASS" if ok else "FAIL"))
         self.get_logger().info("\n" + "\n".join(lines))
         self.exit_code = 0 if ok else 1

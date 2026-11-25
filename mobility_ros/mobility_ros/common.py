@@ -17,6 +17,9 @@ ESTOP = "/mobility/estop"
 ARM_SRV = "/mobility/arm"
 WHEEL_ODOM = "/mobility/wheel_odom"
 DIAGNOSTICS = "/mobility/diagnostics"
+# Remote execution of the 8 loops (Unity runs them inside its physics step):
+CONTROLLER_CONFIG = "/mobility/controller_config"   # String, JSON: resolved gains
+CONTROLLER_ENABLE = "/mobility/controller_enable"   # Bool: state == running
 
 # Publishers of state-like topics (mode, e-stop) are latched so late joiners get the
 # last value. Subscribers use plain RELIABLE/VOLATILE, which matches *any* publisher

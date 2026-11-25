@@ -5,7 +5,7 @@
 # usage: Tools/MobilityBridgeTest/run_bridge_test.sh <tag> [extra_params.yaml] [run_seconds]
 # Results in $WORK/<tag>.{unity.log,ros.log,csv}
 # (no set -u: ROS setup scripts use unset variables)
-TAG=${1:?tag}; EXTRA=${2:-}; RUN=${3:-260}
+TAG=${1:?tag}; EXTRA=${2:-}; RUN=${3:-260}; FPS=${FPS:-0}   # FPS=30 caps Unity's frame rate (editor-like delay)
 HERE=$(cd "$(dirname "$0")" && pwd); PROJ=$(cd "$HERE/../.." && pwd)
 # Run from the ros_mobility reference copy: fall back to the real Unity project.
 [ -d "$PROJ/Assets" ] || PROJ=${UNITY_PROJECT:-$HOME/ROS_unity/unity}
@@ -30,12 +30,19 @@ source /opt/ros/jazzy/setup.bash
 source /home/apratim/ROS_unity/ros_ws/install/setup.bash
 source /home/apratim/ros_mobility/install/setup.bash
 ULOG=$WORK/$TAG.unity.log; RLOG=$WORK/$TAG.ros.log; rm -f $ULOG $RLOG
-ros2 run ros_tcp_endpoint default_server_endpoint --ros-args -p ROS_IP:=127.0.0.1 > $WORK/$TAG.endpoint.log 2>&1 &
+# Never collide with a live session: the port must be free.
+if ss -ltn 2>/dev/null | grep -q ":10000 "; then
+  echo "port 10000 is in use (a ros_mobility/Unity session?); stop it first"; exit 1
+fi
+# Start the endpoint executable directly (not via `ros2 run`), so $! is the real process
+# and cleanup cannot leave it holding port 10000.
+"$(ros2 pkg prefix ros_tcp_endpoint)/lib/ros_tcp_endpoint/default_server_endpoint" \
+  --ros-args -p ROS_IP:=127.0.0.1 > $WORK/$TAG.endpoint.log 2>&1 &
 EP=$!
 "$UNITY" -batchmode -nographics -disable-assembly-updater -projectPath $T -executeMethod BridgeBoot.Run \
-  -logFile $ULOG -runSeconds $RUN -traceOut $WORK/$TAG.csv > /dev/null 2>&1 &
+  -logFile $ULOG -runSeconds $RUN -targetFps $FPS -traceOut $WORK/$TAG.csv > /dev/null 2>&1 &
 UP=$!
-cleanup() { kill $UP 2>/dev/null; kill -INT $LP 2>/dev/null; sleep 2; kill $EP 2>/dev/null; kill -9 $UP 2>/dev/null; }
+cleanup() { kill $UP 2>/dev/null; [ "$LP" != 0 ] && kill -INT $LP 2>/dev/null; sleep 2; kill $EP 2>/dev/null; kill -9 $UP $EP 2>/dev/null; }
 LP=0; trap cleanup EXIT
 echo "waiting for Unity (import can take minutes)..."
 for i in $(seq 1 600); do

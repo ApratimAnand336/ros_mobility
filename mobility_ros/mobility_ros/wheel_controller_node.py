@@ -6,13 +6,21 @@ Srv:  /mobility/arm (SetBool)  -- outputs stay 0 until armed (auto_arm for sim)
 Pub:  /mobility/effort_cmd (JointState, effort field = u per canonical joint)
       /mobility/diagnostics (DiagnosticArray: per-joint error/effort/saturation + state)
 
+remote: true -> this node does NOT compute u. Something else runs the same 8 loops
+(Unity's MobilityBridge, inside its physics step, to avoid the ROS-TCP frame delay). This
+node then still owns the gains and the safety state machine, and publishes:
+      /mobility/controller_config (String, JSON: the resolved per-joint gains, latched + 1 Hz)
+      /mobility/controller_enable (Bool: true only while state == running)
+
 Gains are parameters `steer.kp`, `drive.kv`, ... (see config/common.yaml and the
 per-domain yaml). Any single joint can override them: `fl_drive.kp: 0.4`.
 """
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Bool
+import json
+
+from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool
 
 from mobility_core import PIDGains
@@ -34,6 +42,7 @@ class WheelControllerNode(Node):
         self.fb_timeout = p("feedback_timeout", 0.2)
         self.sp_timeout = p("setpoint_timeout", 0.3)
         self.armed = bool(p("auto_arm", False))
+        self.remote = bool(p("remote", False))
 
         steer = self._gains("steer", PIDGains(kp=3.0, ki=1.0, kd=0.1, i_limit=0.3,
                                               d_filter_tau=0.01, deadzone=0.002))
@@ -62,6 +71,15 @@ class WheelControllerNode(Node):
         self.eff_pub = self.create_publisher(JointState, C.EFFORT_CMD, 10)
         self.diag_pub = self.create_publisher(DiagnosticArray, C.DIAGNOSTICS, 10)
         self.create_timer(self.dt, self.step)
+        if self.remote:
+            self.cfg_msg = String(data=json.dumps(self.ctl.config()))
+            self.cfg_pub = self.create_publisher(String, C.CONTROLLER_CONFIG, C.LATCHED)
+            self.en_pub = self.create_publisher(Bool, C.CONTROLLER_ENABLE, 10)
+            self.cfg_pub.publish(self.cfg_msg)
+            # Re-sent at 1 Hz: the ROS-TCP endpoint does not replay latched messages.
+            self.create_timer(1.0, lambda: self.cfg_pub.publish(self.cfg_msg))
+            self.get_logger().info("remote mode: the 8 loops run elsewhere (Unity); "
+                                   "publishing gains and the enable flag only")
         self.create_timer(1.0 / max(0.1, p("diagnostics_rate", 5.0)), self.publish_diag)
         self.get_logger().info(f"wheel controller up, armed={self.armed}")
 
@@ -131,6 +149,9 @@ class WheelControllerNode(Node):
                 self.get_logger().warn(text)
             self.state = state
 
+        if self.remote:
+            self.en_pub.publish(Bool(data=state == "running"))
+            return
         if state == "running":
             u = self.ctl.update(self.setpoints, self.pos, self.vel, self.dt, self.sp_rates)
         else:
@@ -161,6 +182,9 @@ class WheelControllerNode(Node):
         self.diag_pub.publish(arr)
 
     def on_shutdown(self):
+        if self.remote:
+            self.en_pub.publish(Bool(data=False))
+            return
         names = self.geo.joints
         self.eff_pub.publish(C.make_joint_state(self.get_clock().now().to_msg(), names,
                                                 effort=[0.0] * len(names)))

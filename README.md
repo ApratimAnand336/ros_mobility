@@ -51,6 +51,8 @@ ros_mobility/
 ├── unity/                reference copy of the Unity-side files (source of truth: ~/ROS_unity)
 │   ├── Assets/Scripts/CoupledDiff/MobilityBridge.cs
 │   ├── RoverDriveController.additions.patch
+│   ├── Assets/Scripts/CoupledDiff/MobilityPid.cs   C# port of the 8 loops (runs inside Unity)
+│   ├── parity/parity.py              Python vs C# controller parity test
 │   ├── Tools/MobilityBridgeTest/     headless Unity ↔ ROS acceptance test
 │   └── sync_from_unity.sh            refresh this copy from the Unity project
 ├── NODES.md              node by node: what starts what, each node's tick, start-up, shutdown
@@ -130,7 +132,7 @@ ros2 service call /mobility/arm std_srvs/srv/SetBool "{data: true}"   # the real
 | `domain` | `mock` \| `gazebo` \| `unity` \| `real` | Picks the adapter and `config/<domain>.yaml` |
 | `input` | `keyboard` (key window) \| `keyboard_terminal` \| `joy` \| `none` | Use `none` when Nav2 or a script publishes `/cmd_vel` |
 | `include_sim`, `world`, `gui` | | Gazebo only |
-| `unity_control` | `effort` \| `twist` | Unity only. `effort`: our PIDs drive. `twist`: only `/cmd_vel`, no PID nodes run. |
+| `unity_control` | `setpoint` (default) \| `effort` \| `twist` | Unity only. `setpoint`: our 8 PIDs run *inside* Unity's physics step (a tested C# port), and ROS sends setpoints, gains and enable. `effort`: PIDs run here and u goes over ROS-TCP (only stable at high Unity fps). `twist`: only `/cmd_vel`, Unity's own servos. |
 | `start_endpoint`, `ros_ip` | | Unity only: ROS-TCP endpoint |
 | `demo` | `true` \| `false` | Scripted acceptance drive, then shuts down. Also starts `wheel_odometry`. |
 | `publish_odom` | default `false` | Start `wheel_odometry` without the demo |
@@ -216,9 +218,12 @@ u = kv·sp + ks·sign(sp) + kr·d(sp)/dt + kp·e + I − kd·d(meas)/dt (filtere
 - **Mock demo:** PASS.
 - **Gazebo demo** (headless, `flat.sdf`, the team's rover model): **PASS on all 11 segments**
   under the `ROVER_CONTROLS.md` §12 thresholds. Worst steering p95 is 1.9°.
-- **Unity demo** (headless, flat ground, the coupled rover prefab, through ROS-TCP):
-  **PASS on all 11 segments**, on two runs. Worst steering p95 is 2.5–2.9°. When the ROS
-  stack stops, control returns to the keyboard.
+- **Unity demo** (headless, flat ground, the coupled rover prefab, through ROS-TCP, Unity
+  capped at **10 fps** like the editor): default setpoint mode, where our 8 PIDs run in
+  Unity's physics step. **PASS on all 11 segments**, worst steering p95 2.4°. The hold
+  test also passes: wheels parked at 0°, 43° and 90° move back and forth ≤ 0.07°. When the
+  ROS stack stops, control returns to Unity's own keyboard controller. Python and C#
+  controllers match exactly (`unity/parity/parity.py`).
 - **Real (CAN dry-run, fake EKF topics):** it arms, sends frames, zeros them on e-stop, and
   sends zero frames on Ctrl-C. Killing one wheel's EKF stream stops the controller within
   0.2 s, and it resumes when the stream returns.
@@ -229,6 +234,8 @@ u = kv·sp + ks·sign(sp) + kr·d(sp)/dt + kp·e + I − kd·d(meas)/dt (filtere
   - anything on the real rover.
 
 ## Known issues
+- **Unity `unity_control:=effort` oscillates in the editor** (~10 fps puts ~100 ms of delay
+  in the loop). This is why setpoint mode, where the loops run inside Unity, is the default.
 - After `ros2 launch` stops, the Gazebo server from `rover_sim.launch.py` sometimes
   survives SIGINT. Clean up with `pkill -f "^gz sim "`.
 - Real-rover gains are the sim gains. They need tuning on the rover (OPEN Q15).

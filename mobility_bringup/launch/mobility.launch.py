@@ -65,28 +65,45 @@ def setup(context):
             raise RuntimeError("domain:=unity needs ros_tcp_endpoint: source "
                                "~/ROS_unity/ros_ws/install/setup.zsh first "
                                "(or start_endpoint:=false if it runs elsewhere)")
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if probe.connect_ex((a["ros_ip"], 10000)) == 0:
+                raise RuntimeError(
+                    f"port {a['ros_ip']}:10000 is already taken by another ros_tcp_endpoint, "
+                    "probably a leftover one, possibly on another ROS_DOMAIN_ID. Unity would "
+                    "connect to it, not to this stack. Find it with: ss -ltnp | grep 10000, "
+                    "and stop it (or use start_endpoint:=false if it is yours).")
         acts.append(Node(package="ros_tcp_endpoint", executable="default_server_endpoint",
                          name="ros_tcp_endpoint", output="screen",
                          parameters=[{"ROS_IP": a["ros_ip"], "ROS_TCP_PORT": 10000}]))
 
-    # Unity twist mode: Unity's own servos drive from /cmd_vel; no PID stack runs here.
-    twist_only = domain == "unity" and a["unity_control"] == "twist"
-    if a["unity_control"] not in ("effort", "twist"):
-        raise RuntimeError("unity_control must be effort or twist")
+    # Unity control modes:
+    #   setpoint (default): the 8 loops run INSIDE Unity's physics step (MobilityPid.cs, a
+    #     port of mobility_core). ROS keeps kinematics, gains and the safety state machine:
+    #     wheel_controller runs with remote:=true (publishes gains + enable, no u).
+    #   effort: the loops run here and u goes over ROS-TCP (only stable at high Unity fps).
+    #   twist: Unity's own servos follow /cmd_vel; no PID stack runs here.
+    uc = a["unity_control"]
+    if uc not in ("setpoint", "effort", "twist"):
+        raise RuntimeError("unity_control must be setpoint, effort or twist")
+    twist_only = domain == "unity" and uc == "twist"
+    remote = domain == "unity" and uc == "setpoint"
     if twist_only and _truthy(a["demo"]):
-        raise RuntimeError("demo:=true checks the PIDs; use unity_control:=effort")
+        raise RuntimeError("demo:=true checks the PIDs; use unity_control:=setpoint")
 
     if not twist_only:
         # -- domain adapter (the only domain-specific node) ---------------------------
         adapter = ADAPTERS[domain]
         acts.append(Node(package="mobility_hw", executable=adapter, name=adapter,
-                         output="screen", parameters=p))
+                         output="screen",
+                         parameters=p + ([{"publish_effort": False}] if remote else [])))
 
         # -- identical core -----------------------------------------------------------
         acts.append(Node(package="mobility_ros", executable="swerve_kinematics",
                          name="swerve_kinematics", output="screen", parameters=p))
         acts.append(Node(package="mobility_ros", executable="wheel_controller",
-                         name="wheel_controller", output="screen", parameters=p))
+                         name="wheel_controller", output="screen",
+                         parameters=p + ([{"remote": True}] if remote else [])))
     # The demo's checks read wheel odometry, so it always starts with demo:=true.
     if _truthy(a["publish_odom"]) or _truthy(a["demo"]):
         acts.append(Node(package="mobility_ros", executable="wheel_odometry",
@@ -111,8 +128,12 @@ def setup(context):
         raise RuntimeError("input must be keyboard, keyboard_terminal, joy or none")
 
     if _truthy(a["demo"]):
+        # Unity setpoint mode: grade what the in-Unity loops used (same physics instant as
+        # the joint states), not the ROS-side setpoints (which lead by the TCP frame delay).
         demo = Node(package="mobility_ros", executable="scripted_drive",
-                    name="scripted_drive", output="screen", parameters=p)
+                    name="scripted_drive", output="screen",
+                    parameters=p + ([{"setpoint_topic": "/unity/controller_state"}]
+                                    if remote else []))
         acts.append(demo)
         acts.append(RegisterEventHandler(OnProcessExit(
             target_action=demo, on_exit=[EmitEvent(event=Shutdown(reason="demo done"))])))
@@ -136,8 +157,9 @@ def generate_launch_description():
          "terminal for input:=keyboard_terminal ('' = this terminal, no stdin under launch)"),
         ("start_endpoint", "true", "unity: start ros_tcp_endpoint"),
         ("ros_ip", "127.0.0.1", "unity: ros_tcp_endpoint bind address"),
-        ("unity_control", "effort", "unity: effort = our 8 PIDs drive (MobilityBridge "
-                                    "Effort mode) | twist = only /cmd_vel, Unity's servos drive"),
+        ("unity_control", "setpoint", "unity: setpoint = our 8 PIDs run inside Unity's physics "
+                                      "(default) | effort = PIDs here, u over TCP | twist = "
+                                      "only /cmd_vel, Unity's servos drive"),
     ]
     return LaunchDescription(
         [DeclareLaunchArgument(n, default_value=d, description=h) for n, d, h in args]

@@ -40,15 +40,24 @@ using UnityEngine;
 [DisallowMultipleComponent]
 public class MobilityBridge : MonoBehaviour
 {
-    public enum RosControl { Effort, Twist }
+    /// <summary>
+    /// Auto: whatever ros_mobility sends. Setpoints + gains (wheel_controller remote:=true,
+    /// the default unity_control:=setpoint) -> the 8 loops run HERE, in the physics step
+    /// (MobilityPid.cs, a line-for-line port). Raw efforts (unity_control:=effort) -> applied
+    /// as they come (only stable when Unity renders fast, e.g. headless).
+    /// Twist: only /cmd_vel, Unity's own servos drive.
+    /// </summary>
+    public enum RosControl { Auto, Twist }
+    enum Active { None, Setpoint, Effort, Twist }
 
     [Header("When ROS may drive")]
     public bool enableRosControl = true;
     [Tooltip("Effort: ros_mobility's 8 PIDs drive the joints. Twist: ROS only sends the " +
              "body command, Unity's own servos drive. Set before Play.")]
-    public RosControl rosControl = RosControl.Effort;
-    [Tooltip("Seconds (real time) without a command before control goes back to the keyboard.")]
-    public float streamTimeout = 0.25f;
+    public RosControl rosControl = RosControl.Auto;
+    [Tooltip("Seconds (real time) without a command before control goes back to the keyboard. " +
+             "Above the editor's worst frame time (~0.1 s at 10 fps).")]
+    public float streamTimeout = 0.5f;
     [Tooltip("Toggles 'keyboard only': ROS can never take over while it is on.")]
     public KeyCode keyboardOnlyKey = KeyCode.F8;
     public bool keyboardOnly;
@@ -56,6 +65,14 @@ public class MobilityBridge : MonoBehaviour
     [Header("Topics")]
     public string jointStateTopic = "/unity/joint_states";
     public string effortTopic = "/unity/effort_cmd";
+    public string setpointTopic = "/mobility/wheel_setpoints";
+    public string configTopic = "/mobility/controller_config";
+    public string enableTopic = "/mobility/controller_enable";
+    public string estopTopic = "/mobility/estop";
+    public string controllerStateTopic = "/unity/controller_state";
+    [Tooltip("Setpoint mode: advance the steering setpoint along its rate between ROS " +
+             "messages (they arrive once per rendered frame), at most this long, s.")]
+    public float maxSetpointExtrapolation = 0.15f;
     public string cmdVelTopic = "/cmd_vel";
     public string steerModeTopic = "/mobility/steer_mode";
     public bool publishJointStates = true;
@@ -65,7 +82,7 @@ public class MobilityBridge : MonoBehaviour
              "front to rear, which otherwise yaws the rover when crabbing.")]
     public bool compensateWheelRadii = true;
 
-    [Header("Motor model (effort mode); same numbers as ros_mobility unity.yaml")]
+    [Header("Motor model (setpoint and effort modes); same numbers as ros_mobility unity.yaml")]
     public float busVoltage = 24f;          // V
     public float kt = 0.03f;                // N m / A, motor side
     public float ke = 0.03f;                // V s / rad, motor side
@@ -75,7 +92,7 @@ public class MobilityBridge : MonoBehaviour
     public float steerMaxTorque = 150f;     // N m, joint side
     public float driveMaxTorque = 300f;     // N m, joint side
 
-    [Header("Steering joint friction (effort mode), as in the URDF")]
+    [Header("Steering joint friction (setpoint and effort modes), as in the URDF")]
     public bool modelSteerFriction = true;
     public float steerCoulombFriction = 0.5f;    // N m
     public float steerFrictionSmoothing = 0.1f;  // rad/s
@@ -86,13 +103,38 @@ public class MobilityBridge : MonoBehaviour
     public string status = "idle";
     [Tooltip("Last u per joint: steer FL FR BL BR, drive FL FR BL BR.")]
     public float[] u = new float[8];
+    [Tooltip("Setpoint mode: gains received from ROS (wheel_controller remote mode).")]
+    public string gains = "none yet";
+    public bool rosEnabled;
+    public bool estop;
 
     RoverDriveController rc;
     ROSConnection ros;
     float cmdTime = -1e9f;                // realtimeSinceStartup of the last command
+    float effortTime = -1e9f, setpointTime = -1e9f, enableTime = -1e9f;
+    Active active = Active.None;
+
+    // Setpoint mode: our controller, its inputs and outputs (FL FR BL BR, canonical units).
+    Mobility.WheelController ctl;
+    string configJson;
+    bool wasRunning;
+    double spStamp;                       // Time.timeAsDouble when the setpoints arrived
+    readonly double[] spS = new double[4], spRate = new double[4], spD = new double[4];
+    readonly double[] spUse = new double[4], pS = new double[4], rS = new double[4], vD = new double[4];
+    readonly double[] uS = new double[4], uD = new double[4];
+    readonly string[] spNames = { "fl_steer", "fr_steer", "bl_steer", "br_steer" };
+    readonly string[] dNames = { "fl_drive", "fr_drive", "bl_drive", "br_drive" };
     Vector3 twist;
     string wantMode;
     bool tookKeyboard;
+    bool wasConnected, sawCommand;
+    float nextHint;
+
+    [Header("Diagnostics")]
+    [Tooltip("While ROS drives, log fps, command rate and command age every few seconds.")]
+    public bool logLoopStats = true;
+    int statCmds, statFrames;
+    float statT0, statMaxAge, statMaxFrame;
     float pubAccum;
     readonly string[] names =
         { "fl_steer", "fr_steer", "bl_steer", "br_steer", "fl_drive", "fr_drive", "bl_drive", "br_drive" };
@@ -126,16 +168,23 @@ public class MobilityBridge : MonoBehaviour
         }
         ros = ROSConnection.GetOrCreateInstance();
         ros.RegisterPublisher<JointStateMsg>(jointStateTopic);
-        if (rosControl == RosControl.Effort)
+        if (rosControl == RosControl.Auto)
+        {
+            ros.RegisterPublisher<JointStateMsg>(controllerStateTopic);
+            ros.Subscribe<JointStateMsg>(setpointTopic, OnSetpoints);
+            ros.Subscribe<StringMsg>(configTopic, OnConfig);
+            ros.Subscribe<BoolMsg>(enableTopic, m => { rosEnabled = m.data; enableTime = Time.realtimeSinceStartup; });
+            ros.Subscribe<BoolMsg>(estopTopic, m => estop = m.data);
             ros.Subscribe<Float64MultiArrayMsg>(effortTopic, OnEffort);
+        }
         else
         {
             ros.Subscribe<TwistStampedMsg>(cmdVelTopic, OnTwist);
             ros.Subscribe<StringMsg>(steerModeTopic, m => wantMode = m.data);
         }
-        Debug.Log($"[MobilityBridge] ready: {rosControl} mode, joint states on {jointStateTopic}, " +
-                  $"commands on {(rosControl == RosControl.Effort ? effortTopic : cmdVelTopic)}. " +
-                  $"{keyboardOnlyKey} = keyboard only.");
+        Debug.Log($"[MobilityBridge] ready: {rosControl} mode, joint states on {jointStateTopic}. " +
+                  $"{keyboardOnlyKey} = keyboard only. Without ROS commands the rover keeps " +
+                  "its own keyboard controls.");
     }
 
     void OnEffort(Float64MultiArrayMsg m)
@@ -146,7 +195,102 @@ public class MobilityBridge : MonoBehaviour
             float v = (float)m.data[i];
             u[i] = float.IsFinite(v) ? Mathf.Clamp(v, -1f, 1f) : 0f;
         }
-        cmdTime = Time.realtimeSinceStartup;
+        effortTime = Time.realtimeSinceStartup;
+        if (active != Active.Setpoint) { cmdTime = effortTime; statCmds++; }
+        NoteFirstCommand();
+    }
+
+    void OnSetpoints(JointStateMsg m)
+    {
+        if (m.name == null) return;
+        for (int k = 0; k < m.name.Length; k++)
+        {
+            string n = m.name[k];
+            for (int i = 0; i < 4; i++)
+            {
+                if (n == spNames[i])
+                {
+                    if (m.position != null && k < m.position.Length && double.IsFinite(m.position[k])) spS[i] = m.position[k];
+                    spRate[i] = m.velocity != null && k < m.velocity.Length && double.IsFinite(m.velocity[k]) ? m.velocity[k] : 0.0;
+                }
+                else if (n == dNames[i] && m.velocity != null && k < m.velocity.Length && double.IsFinite(m.velocity[k]))
+                    spD[i] = m.velocity[k];
+            }
+        }
+        spStamp = Time.timeAsDouble;
+        setpointTime = Time.realtimeSinceStartup;
+        if (active != Active.Effort) { cmdTime = setpointTime; statCmds++; }
+        NoteFirstCommand();
+    }
+
+    void OnConfig(StringMsg m)
+    {
+        if (m.data == configJson) return;
+        Mobility.ControllerConfig cfg;
+        try { cfg = JsonUtility.FromJson<Mobility.ControllerConfig>(m.data); }
+        catch (System.Exception e) { Debug.LogError($"[MobilityBridge] bad controller config: {e.Message}"); return; }
+        if (cfg == null || cfg.joints == null || cfg.joints.Length < 8)
+        {
+            Debug.LogError("[MobilityBridge] controller config has fewer than 8 joints; ignored.");
+            return;
+        }
+        configJson = m.data;
+        ctl = new Mobility.WheelController(cfg);
+        var s0 = ctl.steer[0].g; var d0 = ctl.drive[0].g;
+        gains = $"steer kp {s0.kp} ki {s0.ki} kd {s0.kd} kr {s0.kr} | drive kp {d0.kp} ki {d0.ki} kv {d0.kv}";
+        Debug.Log($"[MobilityBridge] controller gains from ROS: {gains}");
+    }
+
+    /// <summary>
+    /// Loop timing while ROS drives. Messages from ROS are delivered once per rendered
+    /// frame, so a low frame rate adds that much delay to every PID loop.
+    /// </summary>
+    void LoopStats()
+    {
+        if (!logLoopStats || !engaged) { statT0 = 0f; return; }
+        float now = Time.realtimeSinceStartup;
+        if (statT0 == 0f) { statT0 = now; statCmds = statFrames = 0; statMaxAge = statMaxFrame = 0f; return; }
+        statMaxAge = Mathf.Max(statMaxAge, now - cmdTime);
+        if (now - statT0 >= 3f)
+        {
+            float span = now - statT0;
+            Debug.Log($"[MobilityBridge] loop: {statFrames / span:F0} fps (worst frame {statMaxFrame * 1000f:F0} ms), " +
+                      $"{statCmds / span:F0} commands/s, worst command age {statMaxAge * 1000f:F0} ms, " +
+                      $"physics {1f / Time.fixedDeltaTime:F0} Hz");
+            statT0 = now; statCmds = statFrames = 0; statMaxAge = statMaxFrame = 0f;
+        }
+    }
+
+    void NoteFirstCommand()
+    {
+        if (sawCommand) return;
+        sawCommand = true;
+        Debug.Log("[MobilityBridge] commands from ros_mobility arriving.");
+    }
+
+    /// <summary>Console hints, so "nothing happens" always says why.</summary>
+    void ReportConnection()
+    {
+        bool connected = ros != null && ros.HasConnectionThread && !ros.HasConnectionError;
+        if (connected != wasConnected)
+        {
+            wasConnected = connected;
+            Debug.Log(connected
+                ? "[MobilityBridge] connected to the ROS endpoint."
+                : "[MobilityBridge] not connected to the ROS endpoint; keyboard controls as usual.");
+        }
+        if (connected && !engaged && Time.realtimeSinceStartup > nextHint)
+        {
+            nextHint = Time.realtimeSinceStartup + 10f;
+            if (!enableRosControl) Debug.Log("[MobilityBridge] connected, but enableRosControl is off.");
+            else if (keyboardOnly) Debug.Log($"[MobilityBridge] connected, but keyboard only is on ({keyboardOnlyKey}).");
+            else if (!sawCommand)
+                Debug.Log("[MobilityBridge] connected, but no commands yet: " +
+                          "is ros_mobility running (domain:=unity)?");
+            else if (rosControl == RosControl.Auto && ctl == null && effortTime < 0f)
+                Debug.Log($"[MobilityBridge] setpoints arriving but no gains on {configTopic} yet " +
+                          "(wheel_controller remote:=true is set by the launch for unity_control:=setpoint).");
+        }
     }
 
     void OnTwist(TwistStampedMsg m)
@@ -156,12 +300,15 @@ public class MobilityBridge : MonoBehaviour
         if (!float.IsFinite(v.x) || !float.IsFinite(v.y) || !float.IsFinite(v.z)) return;
         twist = v;
         cmdTime = Time.realtimeSinceStartup;
+        NoteFirstCommand();
     }
 
     // -------------------------------------------------------------------- loop
 
     void Update()
     {
+        statFrames++;
+        statMaxFrame = Mathf.Max(statMaxFrame, Time.unscaledDeltaTime);
         if (Input.GetKeyDown(keyboardOnlyKey))
         {
             keyboardOnly = !keyboardOnly;
@@ -173,18 +320,27 @@ public class MobilityBridge : MonoBehaviour
     {
         if (rc == null || !rc.IsReady) return;
         float dt = Time.fixedDeltaTime;
+        ReportConnection();
+        LoopStats();
 
-        bool fresh = Time.realtimeSinceStartup - cmdTime < streamTimeout;
-        bool want = enableRosControl && !keyboardOnly && fresh;
-        if (!engaged && want && rc.useKeyboard && rc.enabled) Engage();
-        else if (engaged && !want)
+        float now = Time.realtimeSinceStartup;
+        Active want = Active.None;
+        if (enableRosControl && !keyboardOnly)
+        {
+            if (rosControl == RosControl.Twist) { if (now - cmdTime < streamTimeout) want = Active.Twist; }
+            else if (ctl != null && now - setpointTime < streamTimeout) want = Active.Setpoint;
+            else if (now - effortTime < streamTimeout) want = Active.Effort;
+        }
+        if (engaged && want != active)
             Release(keyboardOnly ? "keyboard only" : !enableRosControl ? "ROS control disabled"
-                                                   : "command stream stopped");
+                    : want == Active.None ? "command stream stopped" : $"switching to {want}");
+        if (!engaged && want != Active.None && rc.useKeyboard && rc.enabled) Engage(want);
 
         if (engaged)
         {
-            if (rosControl == RosControl.Effort) ApplyMotors();
-            else DriveTwist();
+            if (active == Active.Setpoint) RunController(dt);
+            if (active == Active.Twist) DriveTwist();
+            else ApplyMotors();
         }
 
         pubAccum += dt;
@@ -197,9 +353,10 @@ public class MobilityBridge : MonoBehaviour
 
     // -------------------------------------------------------------------- hand-over
 
-    void Engage()
+    void Engage(Active mode)
     {
-        if (rosControl == RosControl.Effort)
+        active = mode;
+        if (mode != Active.Twist)
         {
             // Disabling the controller stops its FixedUpdate; its OnDisable also leaves
             // mode 5's torque mode cleanly.
@@ -216,13 +373,15 @@ public class MobilityBridge : MonoBehaviour
             tookKeyboard = true;
         }
         engaged = true;
-        status = $"ROS driving ({rosControl})";
+        wasRunning = false;
+        if (ctl != null) ctl.Reset();
+        status = $"ROS driving ({mode}{(mode == Active.Setpoint ? ": our 8 PIDs run in Unity at physics rate" : "")})";
         Debug.Log($"[MobilityBridge] {status}. {keyboardOnlyKey} = back to keyboard.");
     }
 
     void Release(string why)
     {
-        if (rosControl == RosControl.Effort)
+        if (active != Active.Twist)
         {
             for (int i = 0; i < 4; i++)
             {
@@ -240,6 +399,7 @@ public class MobilityBridge : MonoBehaviour
             tookKeyboard = false;
         }
         engaged = false;
+        active = Active.None;
         status = $"keyboard ({why})";
         for (int i = 0; i < 8; i++) u[i] = 0f;
         Debug.Log($"[MobilityBridge] back to keyboard: {why}");
@@ -290,6 +450,44 @@ public class MobilityBridge : MonoBehaviour
         return -steerCoulombFriction * Mathf.Clamp(w / s, -1f, 1f) - steerViscousFriction * w;
     }
 
+    // -------------------------------------------------------------------- setpoint mode
+
+    /// <summary>
+    /// One step of ros_mobility's 8 loops, here at the physics rate: no transport delay
+    /// inside the loop. ROS keeps the safety state machine: unless wheel_controller says
+    /// "running" (armed, no e-stop, fresh feedback and setpoints), u = 0.
+    /// </summary>
+    void RunController(float dt)
+    {
+        float now = Time.realtimeSinceStartup;
+        bool running = rosEnabled && now - enableTime < streamTimeout && !estop;
+        if (!running)
+        {
+            for (int i = 0; i < 8; i++) u[i] = 0f;
+            wasRunning = false;
+            return;
+        }
+        if (!wasRunning) { ctl.Reset(); wasRunning = true; }   // fresh integrators, like wheel_controller
+
+        // Setpoints arrive once per rendered frame; carry the steering setpoint along its
+        // rate through the frame's burst of physics steps instead of holding it.
+        double age = System.Math.Min(System.Math.Max(0.0, Time.fixedTimeAsDouble - spStamp), maxSetpointExtrapolation);
+        for (int i = 0; i < 4; i++)
+        {
+            spUse[i] = spS[i] + spRate[i] * age;
+            pS[i] = rc.MeasuredSteerAngle(i);
+            rS[i] = rc.SteerSign(i) * rc.SteerJoint(i).jointVelocity[0];
+            float k = compensateWheelRadii ? rc.WheelRadiusScale(i) : 1f;
+            vD[i] = k * rc.DriveSign(i) * rc.DriveJoint(i).jointVelocity[0];
+        }
+        ctl.Update(spUse, spRate, spD, pS, rS, vD, dt, uS, uD);
+        for (int i = 0; i < 4; i++)
+        {
+            u[i] = (float)uS[i];
+            u[4 + i] = (float)uD[i];
+        }
+    }
+
     // -------------------------------------------------------------------- twist mode
 
     void DriveTwist()
@@ -331,5 +529,21 @@ public class MobilityBridge : MonoBehaviour
             velocity = (double[])jsVel.Clone(),
             effort = jsEff,
         });
+        if (active == Active.Setpoint)
+        {
+            // What the in-Unity loops are doing: setpoint used (steer rad / drive target
+            // rad/s after cos scaling) and u, for plotting and ros2 topic echo.
+            var sp = new double[8]; var eff = new double[8];
+            for (int i = 0; i < 4; i++)
+            {
+                sp[i] = spUse[i]; sp[4 + i] = ctl.driveTarget[i];
+                eff[i] = u[i]; eff[4 + i] = u[4 + i];
+            }
+            ros.Publish(controllerStateTopic, new JointStateMsg
+            {
+                header = new HeaderMsg(), name = names, position = sp,
+                velocity = new double[0], effort = eff,
+            });
+        }
     }
 }

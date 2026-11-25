@@ -34,6 +34,7 @@ ros2 launch mobility_bringup mobility.launch.py domain:=D input:=I [include_sim]
 │
 ├─ 3. Domain adapter: exactly one, chosen by domain
 │     mock → mock_adapter │ gazebo → gazebo_adapter │ unity → unity_adapter │ real → can_adapter
+│     (unity_control:=setpoint, the default: wheel_controller runs remote:=true, so the 8 loops run in Unity)
 │     (unity_control:=twist: no adapter, kinematics or controller; Unity's servos follow /cmd_vel)
 │
 ├─ 4. Core: identical in every domain
@@ -130,7 +131,7 @@ All four subclass `AdapterBase` (`mobility_hw/base.py`). The base class handles:
 |---|---|---|---|---|---|---|
 | **mock_adapter** | `domain:=mock` | `/mobility/effort_cmd` | `/mobility/joint_states` | 200 Hz | For each of the 8 joints, computes torque τ = motor_model(u, ω), then integrates its `JointPlant` (inertia, viscous and Coulomb friction, steering end-stops) in substeps. Optionally adds noise and encoder quantisation. Then publishes. | Watchdog sets u = 0 and the plant coasts to a stop. |
 | **gazebo_adapter** | `domain:=gazebo` | `/joint_states` (Gazebo, sensor QoS), `/mobility/effort_cmd` | `/mobility/joint_states`, `/steer_pid_controller/commands`, `/wheel_pid_controller/commands` (Float64MultiArray, N·m), plus a `switch_controller` service call | 200 Hz + 1 Hz switch retry | Feedback in: `FLE_joint` → `fl_steer` (sign −1) and so on; `BRD` sign −1. Effort out: u → DC motor model → N·m × cmd_sign → the two effort controllers. Sends 0 until the switch succeeds. | Shutdown: publishes zero torque. |
-| **unity_adapter** | `domain:=unity` (`unity_control:=effort`, the default) | `/unity/joint_states`, `/mobility/effort_cmd` | `/mobility/joint_states`, `/unity/effort_cmd` (Float64MultiArray `[steer×4, drive×4]`) | 100 Hz | The Unity `MobilityBridge` already publishes canonical names and signs, so the joint map is all +1. `output_mode: normalized` sends raw u, and the bridge applies the DC-motor model in Unity at 200 Hz. (`torque` would send N·m from the motor model here.) | Shutdown: sends zeros. The bridge hands control back to Unity's keyboard 0.25 s after the stream stops (`docs/UNITY_BRIDGE.md`). |
+| **unity_adapter** | `domain:=unity` | `/unity/joint_states`, `/mobility/effort_cmd` | `/mobility/joint_states`; in `unity_control:=effort` only, also `/unity/effort_cmd` (Float64MultiArray `[steer×4, drive×4]`) | 100 Hz | The bridge already publishes canonical names and signs, so the joint map is all +1. **setpoint (default):** feedback only; the loops run in Unity. **effort:** sends raw u, and the bridge applies the motor model. | Warns every 5 s while Unity is silent. The bridge hands back to Unity's keyboard 0.5 s after its stream stops (`docs/UNITY_BRIDGE.md`). |
 | **can_adapter** | `domain:=real` | EKF topics (`/wheel_{fl,fr,rl,rr}/steer_encoder`, placeholders), `/mobility/effort_cmd`, `/mobility/estop` | `/mobility/joint_states`, CAN frames | 100 Hz frames + 20 Hz heartbeat | u → `shape_duty` (sign, per-joint deadband lift, `max_duty` 0.9) → int16 → drive frame (0x101) and steer frame (0x102). The heartbeat (0x100) carries a counter plus `active` and `estop` flags. Backend: `dryrun` (logs, the default), `socketcan` or `virtual`. | E-stop → zero frames. Shutdown → 3 zero frames. The MCU must also run its own watchdog (`docs/CAN_PROTOCOL.md`). |
 
 ### 4.2 `swerve_kinematics` (mobility_ros/swerve_kinematics_node.py)
@@ -163,6 +164,14 @@ All four subclass `AdapterBase` (`mobility_hw/base.py`). The base class handles:
 
 ### 4.3 `wheel_controller` (mobility_ros/wheel_controller_node.py): the 8 PIDs
 - **Starts from:** the launch file, always.
+- **Remote mode** (`remote: true`, set by the launch for Unity `unity_control:=setpoint`):
+  the node computes no u. It still runs the state machine below, and publishes:
+  - `/mobility/controller_config`: String, JSON with the resolved per-joint gains; latched
+    and re-sent at 1 Hz;
+  - `/mobility/controller_enable`: Bool, true only in `running`.
+
+  Unity's `MobilityBridge` runs the same loops (`MobilityPid.cs`, kept identical by
+  `unity/parity/parity.py`) inside its physics step, and outputs u = 0 unless enabled.
 - **In:**
   - `/mobility/wheel_setpoints` and `/mobility/joint_states`.
   - `/mobility/estop`.
